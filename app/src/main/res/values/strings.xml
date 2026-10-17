@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">QuickDNS Switcher</string>
+    <string name="vpn_running">QuickDNS активен</string>
+    <string name="disconnect">Отключить</string>
+</resources>
