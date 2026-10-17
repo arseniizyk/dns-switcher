@@ -1,19 +1,23 @@
-# QuickDNS Switcher
+# DNS Switcher
 
-Android application for system DNS switching.
+Android application for system DNS switching without Root privileges via local `VpnService`.
 
 ## Overview
 
-The application captures UDP DNS queries (port 53) via a local TUN interface and relays them to configured upstream resolvers using standard UDP or DNS-over-TLS (DoT, port 853). All non-DNS traffic bypasses the VPN tunnel (`allowBypass()`), preserving native Wi-Fi/cellular throughput and latency.
+The application captures UDP DNS queries (port 53) via a local TUN loopback interface and relays them to configured upstream resolvers using standard UDP or DNS-over-TLS (DoT, port 853). All generic non-DNS application traffic (HTTP/HTTPS, messaging, media) completely bypasses the VPN tunnel (`allowBypass()`), preserving native Wi-Fi/cellular throughput and latency.
 
 ## Key Features
 
-- **No Root Required**: Operates using Android's native `VpnService` API.
-- **Selective Routing**: Only DNS endpoints (`10.0.0.1`, `10.0.0.3`, `fd00::1`) are routed into the TUN interface; generic TCP/UDP traffic is untouched.
-- **IPv6 Leak Protection**: Configured IPv6 virtual interface to prevent ISP DNS fallback on dual-stack networks.
-- **Upstream Protocols**: Supports standard IPv4 DNS endpoints and DoT/DoQ domain targets.
-- **Fallback Transparency**: Explicit visual indicators when an upstream host is unreachable and fallback routing is engaged.
-- **State Persistence**: Custom DNS configurations and selection state persist across process restarts via `SharedPreferences`.
+- **No Root Required**: Operates entirely in user space via the Android `VpnService` API.
+- **Selective DNS Routing**: Only virtual DNS endpoints (`10.0.0.1`, `10.0.0.3`, `fd00::1`) are routed into the TUN interface; generic TCP/UDP traffic is untouched.
+- **Real-Time Latency Measurement**: Live round-trip time (RTT in ms) benchmarks for each configured server with visual color coding.
+- **Quick Settings Tile**: Fast single-tap toggle directly from the Android notification shade to enable or disable active DNS protection.
+- **IPv6 Leak Protection**: Virtual IPv6 loopback route prevents mobile ISP DNS fallback on dual-stack networks.
+- **Flexible Upstream Protocols**: Supports standard IPv4 DNS endpoints and encrypted DoT/DoQ domain targets.
+- **Resolver Management**: Delete presets or custom resolvers, with instant one-click restoration of defaults.
+- **Fallback Transparency**: Automatic fallback indicators if an upstream host is unreachable.
+- **State Persistence**: Selected endpoints and custom configurations persist across restarts via `SharedPreferences`.
+- **Fast Startup**: Smooth Network Core launch transition without static splash icon flicker.
 
 ## Tech Stack
 
