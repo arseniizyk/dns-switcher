@@ -8,7 +8,16 @@ import org.json.JSONObject
 object DnsPreferences {
     private const val PREFS_NAME = "quick_dns_preferences"
     private const val KEY_CUSTOM_DNS = "key_custom_dns_list"
+    private const val KEY_DELETED_PRESET_IDS = "key_deleted_preset_ids"
     private const val KEY_SELECTED_DNS_ID = "key_selected_dns_id"
+
+    val DEFAULT_PRESETS = listOf(
+        DnsItem("cf", "Cloudflare DNS", "1.1.1.1", "Сверхбыстрый и приватный (1.1.1.1)", hostname = "one.one.one.one"),
+        DnsItem("adguard_dot", "AdGuard (DoT / DoQ)", "dns.adguard.com", "Фильтрация рекламы и трекеров (dns.adguard.com)", hostname = "dns.adguard.com", isDoT = true),
+        DnsItem("geohide_dot", "Geohide DNS", "geohide.ru", "Обход блокировок и DoT/DoQ (geohide.ru)", hostname = "geohide.ru", isDoT = true),
+        DnsItem("google", "Google DNS", "8.8.8.8", "Глобальная стабильность Anycast (8.8.8.8)", hostname = "dns.google"),
+        DnsItem("quad9", "Quad9", "9.9.9.9", "Защита от вредоносных сайтов (9.9.9.9)", hostname = "dns.quad9.net")
+    )
 
     private fun getPrefs(context: Context): SharedPreferences {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -20,6 +29,23 @@ object DnsPreferences {
 
     fun getSelectedDnsId(context: Context): String? {
         return getPrefs(context).getString(KEY_SELECTED_DNS_ID, null)
+    }
+
+    fun saveDeletedPresetIds(context: Context, ids: Set<String>) {
+        getPrefs(context).edit().putStringSet(KEY_DELETED_PRESET_IDS, ids).apply()
+    }
+
+    fun getDeletedPresetIds(context: Context): Set<String> {
+        return getPrefs(context).getStringSet(KEY_DELETED_PRESET_IDS, emptySet()) ?: emptySet()
+    }
+
+    fun getActivePresets(context: Context): List<DnsItem> {
+        val deleted = getDeletedPresetIds(context)
+        return DEFAULT_PRESETS.filter { it.id !in deleted }
+    }
+
+    fun restoreDefaultPresets(context: Context) {
+        getPrefs(context).edit().remove(KEY_DELETED_PRESET_IDS).apply()
     }
 
     fun saveCustomDnsList(context: Context, list: List<DnsItem>) {

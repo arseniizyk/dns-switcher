@@ -32,9 +32,10 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -58,7 +59,7 @@ import kotlinx.coroutines.launch
 data class DnsItem(
     val id: String,
     val name: String,
-    val target: String, // IPv4 или имя хоста DoT / DoQ (напр. geohide.ru, dns.adguard.com)
+    val target: String,
     val description: String,
     val hostname: String? = null,
     val isCustom: Boolean = false,
@@ -72,12 +73,109 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             QuickDNSSwitcherTheme {
+                var showSplash by remember { mutableStateOf(true) }
+
+                LaunchedEffect(Unit) {
+                    delay(750)
+                    showSplash = false
+                }
+
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    QuickDnsScreen()
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = showSplash,
+                        exit = androidx.compose.animation.fadeOut(animationSpec = tween(220))
+                    ) {
+                        NetworkCoreSplash()
+                    }
+
+                    if (!showSplash) {
+                        QuickDnsScreen()
+                    }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+fun NetworkCoreSplash() {
+    val coreScale = remember { androidx.compose.animation.core.Animatable(0.2f) }
+    val nodeAlpha = remember { androidx.compose.animation.core.Animatable(0.0f) }
+    val nodeDistance = remember { androidx.compose.animation.core.Animatable(1.4f) }
+
+    LaunchedEffect(Unit) {
+        launch {
+            nodeAlpha.animateTo(1f, animationSpec = tween(250))
+            nodeAlpha.animateTo(0.2f, animationSpec = tween(400))
+        }
+        launch {
+            nodeDistance.animateTo(0.9f, animationSpec = tween(550, easing = FastOutSlowInEasing))
+        }
+        launch {
+            coreScale.animateTo(
+                targetValue = 1f,
+                animationSpec = tween(500, easing = FastOutSlowInEasing)
+            )
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF0F172A)),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier.size(120.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            val dist = nodeDistance.value
+
+            // 3 внешних узла, сходящиеся к центру
+            Box(
+                modifier = Modifier
+                    .offset(y = (-44 * dist).dp)
+                    .size(12.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFF10B981).copy(alpha = nodeAlpha.value))
+            )
+            Box(
+                modifier = Modifier
+                    .offset(x = (-38 * dist).dp, y = (32 * dist).dp)
+                    .size(12.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFF10B981).copy(alpha = nodeAlpha.value))
+            )
+            Box(
+                modifier = Modifier
+                    .offset(x = (38 * dist).dp, y = (32 * dist).dp)
+                    .size(12.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFF10B981).copy(alpha = nodeAlpha.value))
+            )
+
+            // Центральное светящееся ядро безопасности
+            Box(
+                modifier = Modifier
+                    .size(64.dp)
+                    .scale(coreScale.value)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(
+                        Brush.linearGradient(
+                            listOf(Color(0xFF6366F1), Color(0xFF4F46E5))
+                        )
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Security,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(34.dp)
+                )
             }
         }
     }
@@ -93,36 +191,8 @@ fun QuickDnsScreen() {
 
     val vpnStatus by DnsVpnService.vpnState.collectAsState()
 
-    // Таймер применения DNS (DNS кэш и переключение сокетов обычно занимают 5-10 сек)
-    var remainingApplySeconds by remember { mutableIntStateOf(0) }
-    var activeApplyDnsTarget by remember { mutableStateOf<String?>(null) }
-
-    LaunchedEffect(vpnStatus.isActive, vpnStatus.currentDnsIp, vpnStatus.currentHostname) {
-        if (vpnStatus.isActive) {
-            val currentTarget = vpnStatus.currentHostname ?: vpnStatus.currentDnsIp ?: ""
-            if (currentTarget != activeApplyDnsTarget || remainingApplySeconds == 0) {
-                activeApplyDnsTarget = currentTarget
-                remainingApplySeconds = 10
-                while (remainingApplySeconds > 0) {
-                    delay(1000L)
-                    remainingApplySeconds--
-                }
-            }
-        } else {
-            remainingApplySeconds = 0
-            activeApplyDnsTarget = null
-        }
-    }
-
-    // Предустановленные DNS: включая IPv4 и DoT/DoQ хосты по требованию
-    val defaultPresets = remember {
-        listOf(
-            DnsItem("cf", "Cloudflare DNS", "1.1.1.1", "Сверхбыстрый и приватный (1.1.1.1)", hostname = "one.one.one.one"),
-            DnsItem("adguard_dot", "AdGuard (DoT / DoQ)", "dns.adguard.com", "Фильтрация рекламы и трекеров (dns.adguard.com)", hostname = "dns.adguard.com", isDoT = true),
-            DnsItem("geohide_dot", "Geohide DNS", "geohide.ru", "Обход блокировок и DoT/DoQ (geohide.ru)", hostname = "geohide.ru", isDoT = true),
-            DnsItem("google", "Google DNS", "8.8.8.8", "Глобальная стабильность Anycast (8.8.8.8)", hostname = "dns.google"),
-            DnsItem("quad9", "Quad9", "9.9.9.9", "Защита от вредоносных сайтов (9.9.9.9)", hostname = "dns.quad9.net")
-        )
+    var activePresets by remember {
+        mutableStateOf(DnsPreferences.getActivePresets(context))
     }
 
     var customDnsList by remember {
@@ -131,8 +201,51 @@ fun QuickDnsScreen() {
 
     var selectedDns by remember {
         val savedId = DnsPreferences.getSelectedDnsId(context)
-        val initial = (defaultPresets + customDnsList).firstOrNull { it.id == savedId } ?: defaultPresets[0]
+        val all = activePresets + customDnsList
+        val initial = all.firstOrNull { it.id == savedId }
+            ?: activePresets.firstOrNull()
+            ?: customDnsList.firstOrNull()
+            ?: DnsPreferences.DEFAULT_PRESETS.first()
         mutableStateOf(initial)
+    }
+
+    var pingMap by remember { mutableStateOf(mapOf<String, Long>()) }
+    var isCheckingPings by remember { mutableStateOf(false) }
+
+    fun refreshAllPings() {
+        coroutineScope.launch {
+            isCheckingPings = true
+            val all = activePresets + customDnsList
+            val results = mutableMapOf<String, Long>()
+            all.forEach { dns ->
+                val rtt = DnsPingUtil.measureDnsLatency(dns.target, dns.isDoT)
+                results[dns.id] = rtt
+            }
+            pingMap = results
+            isCheckingPings = false
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        refreshAllPings()
+    }
+
+    // Статус применения DNS и проверка пинга активного сервера
+    var activePingMs by remember { mutableStateOf<Long?>(null) }
+    var isVerifyingActiveDns by remember { mutableStateOf(false) }
+
+    LaunchedEffect(vpnStatus.isActive, vpnStatus.currentDnsIp, vpnStatus.currentHostname) {
+        if (vpnStatus.isActive) {
+            isVerifyingActiveDns = true
+            val target = vpnStatus.currentHostname ?: vpnStatus.currentDnsIp ?: selectedDns.target
+            val isDoT = selectedDns.isDoT || target.any { it.isLetter() }
+            val rtt = DnsPingUtil.measureDnsLatency(target, isDoT)
+            activePingMs = if (rtt >= 0) rtt else null
+            isVerifyingActiveDns = false
+        } else {
+            activePingMs = null
+            isVerifyingActiveDns = false
+        }
     }
 
     var customTargetInput by remember { mutableStateOf("") }
@@ -171,21 +284,8 @@ fun QuickDnsScreen() {
     Scaffold(
         modifier = Modifier
             .fillMaxSize()
-            .imePadding(),
-        topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        text = "QuickDNS Switcher",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 20.sp
-                    )
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant
-                )
-            )
-        }
+            .statusBarsPadding()
+            .imePadding()
     ) { innerPadding ->
         LazyColumn(
             state = listState,
@@ -193,12 +293,12 @@ fun QuickDnsScreen() {
                 .fillMaxSize()
                 .padding(innerPadding)
                 .padding(horizontal = 16.dp),
-            contentPadding = PaddingValues(bottom = 32.dp),
+            contentPadding = PaddingValues(top = 8.dp, bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             item { Spacer(modifier = Modifier.height(8.dp)) }
 
-            // Большая кнопка статуса (Включено / Выключено)
+            // Большая кнопка статуса
             item {
                 BigStatusButton(
                     isActive = vpnStatus.isActive,
@@ -216,44 +316,80 @@ fun QuickDnsScreen() {
                 )
             }
 
-            // Карточка статуса применения DNS с таймером
+            // Информационный баннер реального статуса подключения
             if (vpnStatus.isActive) {
                 item {
-                    DnsApplyStatusBanner(
-                        remainingSeconds = remainingApplySeconds,
-                        totalSeconds = 10,
-                        dnsName = vpnStatus.currentDnsName ?: selectedDns.name
+                    DnsActiveHealthBanner(
+                        dnsName = vpnStatus.currentDnsName ?: selectedDns.name,
+                        target = vpnStatus.currentHostname ?: vpnStatus.currentDnsIp ?: selectedDns.target,
+                        pingMs = activePingMs,
+                        isChecking = isVerifyingActiveDns,
+                        isFallback = vpnStatus.isUsingFallback
                     )
                 }
             }
 
-            // Заголовок списка
+            // Заголовок списка предустановленных DNS
             item {
-                Text(
-                    text = "Предустановленные DNS (IPv4, DoT, DoQ)",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(top = 8.dp)
-                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Предустановленные DNS",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+
+                    val deletedPresets = DnsPreferences.getDeletedPresetIds(context)
+                    if (deletedPresets.isNotEmpty()) {
+                        TextButton(
+                            onClick = {
+                                DnsPreferences.restoreDefaultPresets(context)
+                                activePresets = DnsPreferences.DEFAULT_PRESETS
+                                refreshAllPings()
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Text("Восстановить", fontSize = 12.sp)
+                        }
+                    }
+                }
             }
 
-            // Список предустановленных DNS
-            items(defaultPresets) { dns ->
+            // Список предустановленных DNS (с возможностью удаления)
+            items(activePresets, key = { it.id }) { dns ->
                 val isCurrent = vpnStatus.isActive && (
                     vpnStatus.currentDnsIp == dns.target ||
                     vpnStatus.currentHostname == dns.target ||
                     vpnStatus.currentHostname == dns.hostname
                 )
                 val isSelected = selectedDns.id == dns.id
+                val latency = pingMap[dns.id]
 
                 DnsCard(
                     dns = dns,
                     isActive = isCurrent,
                     isSelected = isSelected,
+                    latencyMs = latency,
                     onSelect = {
-                        selectedDns = dns
                         switchOrStartVpn(dns)
+                    },
+                    onDelete = {
+                        if (vpnStatus.isActive && (vpnStatus.currentDnsIp == dns.target || vpnStatus.currentHostname == dns.target)) {
+                            DnsVpnService.stop(context)
+                        }
+                        val currentDeleted = DnsPreferences.getDeletedPresetIds(context).toMutableSet()
+                        currentDeleted.add(dns.id)
+                        DnsPreferences.saveDeletedPresetIds(context, currentDeleted)
+                        activePresets = activePresets.filter { it.id != dns.id }
+                        if (selectedDns.id == dns.id) {
+                            selectedDns = (activePresets + customDnsList).firstOrNull() ?: DnsPreferences.DEFAULT_PRESETS.first()
+                        }
                     }
                 )
             }
@@ -270,19 +406,20 @@ fun QuickDnsScreen() {
                     )
                 }
 
-                items(customDnsList) { dns ->
+                items(customDnsList, key = { it.id }) { dns ->
                     val isCurrent = vpnStatus.isActive && (
                         vpnStatus.currentDnsIp == dns.target ||
                         vpnStatus.currentHostname == dns.target
                     )
                     val isSelected = selectedDns.id == dns.id
+                    val latency = pingMap[dns.id]
 
                     DnsCard(
                         dns = dns,
                         isActive = isCurrent,
                         isSelected = isSelected,
+                        latencyMs = latency,
                         onSelect = {
-                            selectedDns = dns
                             switchOrStartVpn(dns)
                         },
                         onDelete = {
@@ -292,6 +429,9 @@ fun QuickDnsScreen() {
                             val updated = customDnsList.filter { it.id != dns.id }
                             customDnsList = updated
                             DnsPreferences.saveCustomDnsList(context, updated)
+                            if (selectedDns.id == dns.id) {
+                                selectedDns = (activePresets + updated).firstOrNull() ?: DnsPreferences.DEFAULT_PRESETS.first()
+                            }
                         }
                     )
                 }
@@ -349,7 +489,7 @@ fun QuickDnsScreen() {
                                     )
                                 } else {
                                     Text(
-                                        text = "Поддерживаются DoT/DoQ имена хостов (geohide.ru, dns.adguard.com)",
+                                        text = "Поддерживаются IPv4 и DoT/DoQ имена хостов",
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
@@ -397,6 +537,7 @@ fun QuickDnsScreen() {
                                     isInputError = false
                                     focusManager.clearFocus()
                                     Toast.makeText(context, "DNS $name добавлен!", Toast.LENGTH_SHORT).show()
+                                    refreshAllPings()
                                 } else {
                                     isInputError = true
                                 }
@@ -544,6 +685,7 @@ fun DnsCard(
     dns: DnsItem,
     isActive: Boolean,
     isSelected: Boolean,
+    latencyMs: Long? = null,
     onSelect: () -> Unit,
     onDelete: (() -> Unit)? = null
 ) {
@@ -627,13 +769,35 @@ fun DnsCard(
                         }
                     }
                 }
+
                 Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = dns.target,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.SemiBold
-                )
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = dns.target,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold
+                    )
+
+                    if (latencyMs != null) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        val pingColor = when {
+                            latencyMs < 0 -> MaterialTheme.colorScheme.error
+                            latencyMs < 50 -> Color(0xFF10B981)
+                            latencyMs < 120 -> Color(0xFFF59E0B)
+                            else -> MaterialTheme.colorScheme.error
+                        }
+                        val pingText = if (latencyMs < 0) "Недоступен" else "${latencyMs} ms"
+                        Text(
+                            text = "• $pingText",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = pingColor
+                        )
+                    }
+                }
+
                 Text(
                     text = dns.description,
                     style = MaterialTheme.typography.bodySmall,
@@ -646,7 +810,7 @@ fun DnsCard(
                     Icon(
                         imageVector = Icons.Default.Delete,
                         contentDescription = "Удалить",
-                        tint = MaterialTheme.colorScheme.error.copy(alpha = 0.8f)
+                        tint = MaterialTheme.colorScheme.error.copy(alpha = 0.7f)
                     )
                 }
             } else {
@@ -682,7 +846,6 @@ fun isValidDnsTarget(target: String): Boolean {
     val clean = sanitizeDnsTarget(target)
     if (clean.isEmpty()) return false
 
-    // Check if IPv4
     val parts = clean.split(".")
     if (parts.size == 4 && parts.all { it.toIntOrNull() != null }) {
         for (part in parts) {
@@ -693,102 +856,76 @@ fun isValidDnsTarget(target: String): Boolean {
         return clean != "0.0.0.0" && clean != "255.255.255.255"
     }
 
-    // Check if valid Domain name / Hostname (e.g. geohide.ru, dns.adguard.com)
     val domainRegex = Regex("^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\\.)+[a-zA-Z]{2,63}$")
     return domainRegex.matches(clean)
 }
 
 @Composable
-fun DnsApplyStatusBanner(
-    remainingSeconds: Int,
-    totalSeconds: Int,
-    dnsName: String
+fun DnsActiveHealthBanner(
+    dnsName: String,
+    target: String,
+    pingMs: Long?,
+    isChecking: Boolean,
+    isFallback: Boolean
 ) {
-    val isApplying = remainingSeconds > 0
-    val progress = if (totalSeconds > 0) ((totalSeconds - remainingSeconds).toFloat() / totalSeconds.toFloat()).coerceIn(0f, 1f) else 1f
-
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (isApplying) {
-                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+            containerColor = if (isFallback) {
+                Color(0xFF78350F).copy(alpha = 0.2f)
             } else {
                 Color(0xFF10B981).copy(alpha = 0.12f)
             }
         ),
         border = androidx.compose.foundation.BorderStroke(
             width = 1.dp,
-            color = if (isApplying) MaterialTheme.colorScheme.primary.copy(alpha = 0.3f) else Color(0xFF10B981).copy(alpha = 0.4f)
+            color = if (isFallback) Color(0xFFF59E0B).copy(alpha = 0.4f) else Color(0xFF10B981).copy(alpha = 0.4f)
         )
     ) {
-        Column(
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp)
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                if (isApplying) {
-                    CircularProgressIndicator(
-                        progress = { progress },
-                        modifier = Modifier.size(28.dp),
-                        strokeWidth = 3.dp,
-                        color = MaterialTheme.colorScheme.primary,
-                        trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
-                    )
-                } else {
-                    Icon(
-                        imageVector = Icons.Default.CheckCircle,
-                        contentDescription = null,
-                        tint = Color(0xFF10B981),
-                        modifier = Modifier.size(28.dp)
-                    )
-                }
-
-                Spacer(modifier = Modifier.width(12.dp))
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = if (isApplying) "Применение DNS на устройстве..." else "DNS успешно применен!",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = if (isApplying) MaterialTheme.colorScheme.onSurface else Color(0xFF10B981)
-                    )
-                    Text(
-                        text = if (isApplying) {
-                            "Полное применение через: ${remainingSeconds} сек"
-                        } else {
-                            "DNS активен. Все новые запросы идут через $dnsName"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        fontWeight = if (isApplying) FontWeight.SemiBold else FontWeight.Normal,
-                        color = if (isApplying) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+            if (isChecking) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(26.dp),
+                    strokeWidth = 2.5.dp,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Default.CheckCircle,
+                    contentDescription = null,
+                    tint = if (isFallback) Color(0xFFF59E0B) else Color(0xFF10B981),
+                    modifier = Modifier.size(26.dp)
+                )
             }
 
-            if (isApplying) {
-                Spacer(modifier = Modifier.height(10.dp))
-                LinearProgressIndicator(
-                    progress = { progress },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(6.dp)
-                        .clip(RoundedCornerShape(3.dp)),
-                    color = MaterialTheme.colorScheme.primary,
-                    trackColor = MaterialTheme.colorScheme.surfaceVariant
-                )
-                Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "Очистка системного DNS-кэша и маршрутизация сокетов (~10 сек)",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                    text = if (isFallback) "Резервный DNS активен" else "DNS подключен и активен",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isFallback) Color(0xFFF59E0B) else Color(0xFF10B981)
+                )
+
+                val statusSubtitle = when {
+                    isChecking -> "Проверка доступности резолвера..."
+                    pingMs != null && pingMs >= 0 -> "Сервер отвечает • Задержка: ${pingMs} ms"
+                    else -> "Все запросы направляются через $dnsName"
+                }
+
+                Text(
+                    text = statusSubtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
     }
 }
-
