@@ -20,20 +20,26 @@ android {
 
     signingConfigs {
         create("release") {
-            storeFile = file("quickdns-release.jks")
-            storePassword = "quickdns123"
-            keyAlias = "quickdns"
-            keyPassword = "quickdns123"
-            enableV1Signing = true
-            enableV2Signing = true
-            enableV3Signing = true
+            val keyStoreFile = file("quickdns-release.jks")
+            if (keyStoreFile.exists()) {
+                storeFile = keyStoreFile
+                storePassword = System.getenv("KEYSTORE_PASSWORD") ?: "quickdns123"
+                keyAlias = System.getenv("KEY_ALIAS") ?: "quickdns"
+                keyPassword = System.getenv("KEY_PASSWORD") ?: "quickdns123"
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+            }
         }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("release")
+            val releaseSigning = signingConfigs.findByName("release")
+            if (releaseSigning?.storeFile?.exists() == true) {
+                signingConfig = releaseSigning
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

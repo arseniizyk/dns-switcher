@@ -38,16 +38,17 @@ import javax.net.ssl.SSLSocketFactory
  * Надежный VpnService для быстрой смены DNS без Root.
  *
  * Архитектурное решение проблемы "сеть отпадает":
- * 1. TUN интерфейс настраивается с адресом 10.0.0.2/32.
- * 2. DNS серверы назначаются на 10.0.0.1 и 10.0.0.3, и ТОЛЬКО эти два адреса маршрутизируются (addRoute).
+ * 1. TUN интерфейс настраивается с адресом 10.0.0.2/32 и IPv6 fd00::2/128.
+ * 2. DNS серверы назначаются на 10.0.0.1, 10.0.0.3 и fd00::1, и ТОЛЬКО эти адреса маршрутизируются (addRoute).
  * 3. Вызывается builder.allowBypass() и addDisallowedApplication(packageName) — благодаря этому
  *    весь обычный интернет-трафик (HTTP, HTTPS, видео, Telegram, игры) идет напрямую через Wi-Fi / LTE!
  * 4. Вызывается setUnderlyingNetworks(null) для корректной работы системного сетевого монитора Android.
- * 5. TUN интерфейс перехватывает исключительно DNS-запросы к 10.0.0.1 / 10.0.0.3 (порт 53 UDP).
+ * 5. TUN интерфейс перехватывает исключительно DNS-запросы к виртуальным DNS (порт 53 UDP).
  * 6. Запросы пересылаются на вышестоящий DNS через защищенный сокет protect():
- *    - Сначала пробуется прямой UDP (порт 53)
- *    - Если порт 53 недоступен (блокировка провайдером/DoT-хост) — автоматически используется DoT (порт 853 TLS)
- *    - В крайнем случае безопасный fallback на резервный DNS, чтобы интернет никогда не пропадал.
+ *    - Пробуется DoT (если хост DoT/DoQ или порт 853)
+ *    - Прямой UDP (порт 53)
+ *    - Повторный DoT
+ *    - Если апстрим недоступен — fallback выполняется только при невозможности резолва с фиксацией в статусе.
  * 7. В ответном пакете Source IP устанавливается в точности равным тому IP, на который система посылала запрос,
  *    с корректно рассчитанными контрольными суммами IPv4 и UDP.
  */
@@ -57,8 +58,9 @@ class DnsVpnService : VpnService() {
     private var inStream: FileInputStream? = null
     private var outStream: FileOutputStream? = null
 
+    private val streamLock = Any()
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private val dnsThreadPool = Executors.newFixedThreadPool(8)
+    private val dnsThreadPool = Executors.newCachedThreadPool()
 
     @Volatile
     private var isRunning = false
@@ -76,6 +78,9 @@ class DnsVpnService : VpnService() {
     @Volatile
     private var isDoTHost: Boolean = false
 
+    @Volatile
+    private var isUsingFallback: Boolean = false
+
     companion object {
         private const val TAG = "DnsVpnService"
         const val ACTION_START = "com.quickdns.switcher.ACTION_START"
@@ -91,12 +96,17 @@ class DnsVpnService : VpnService() {
         const val TUN_PRIMARY_DNS = "10.0.0.1"
         const val TUN_SECONDARY_DNS = "10.0.0.3"
 
+        // Виртуальный IPv6 для предотвращения утечки DNS через IPv6-сети
+        const val TUN_IPV6_INTERFACE = "fd00::2"
+        const val TUN_IPV6_DNS = "fd00::1"
+
         private val _vpnState = MutableStateFlow(
             VpnStatus(
                 isActive = false,
                 currentDnsIp = null,
                 currentDnsName = null,
-                currentHostname = null
+                currentHostname = null,
+                isUsingFallback = false
             )
         )
         val vpnState: StateFlow<VpnStatus> = _vpnState.asStateFlow()
@@ -164,6 +174,7 @@ class DnsVpnService : VpnService() {
             upstreamTargetName = dnsName
             upstreamTargetHost = cleanTarget
             isDoTHost = isHostname || dnsName.contains("DoT", ignoreCase = true) || dnsName.contains("DoQ", ignoreCase = true)
+            isUsingFallback = false
 
             // Резолвим IP адрес апстрима в отдельном потоке
             val resolvedList = withContext(Dispatchers.IO) {
@@ -172,12 +183,12 @@ class DnsVpnService : VpnService() {
             upstreamResolvedAddresses = resolvedList
 
             val displayIp = resolvedList.firstOrNull()?.hostAddress ?: cleanTarget
-            Log.i(TAG, "Подготовка DNS: $dnsName ($cleanTarget) -> $displayIp")
+            Log.i(TAG, "Подготовка DNS: $dnsName ($cleanTarget) -> $displayIp (Fallback: $isUsingFallback)")
 
             // Если VPN уже стабильно запущен — мгновенное переключение апстрима без разрыва сетевого TUN!
             if (vpnInterface != null && isRunning) {
                 Log.i(TAG, "Мгновенное переключение активного DNS апстрима на лету...")
-                updateNotificationAndState(displayIp, dnsName, hostnameToDisplay)
+                updateNotificationAndState(displayIp, dnsName, hostnameToDisplay, isUsingFallback)
                 return
             }
 
@@ -188,13 +199,23 @@ class DnsVpnService : VpnService() {
                 .setSession("QuickDNS Switcher")
                 .setMtu(1500)
                 .addAddress(TUN_INTERFACE_IP, 32)
-                // Назначаем виртуальные DNS серверы
+                // Назначаем виртуальные DNS серверы IPv4
                 .addDnsServer(TUN_PRIMARY_DNS)
                 .addDnsServer(TUN_SECONDARY_DNS)
                 // Маршрутизируем ТОЛЬКО эти виртуальные DNS адреса в TUN!
                 .addRoute(TUN_PRIMARY_DNS, 32)
                 .addRoute(TUN_SECONDARY_DNS, 32)
-                .setBlocking(true)
+
+            // Защита от утечки DNS в сетях IPv6 (перехват IPv6 DNS запросов в TUN)
+            try {
+                builder.addAddress(TUN_IPV6_INTERFACE, 128)
+                builder.addDnsServer(TUN_IPV6_DNS)
+                builder.addRoute(TUN_IPV6_DNS, 128)
+            } catch (e: Exception) {
+                Log.w(TAG, "Не удалось настроить IPv6 DNS интерфейс", e)
+            }
+
+            builder.setBlocking(true)
 
             // Разрешаем всему остальному трафику обходить VPN (критично для стабильности сети!)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -214,12 +235,14 @@ class DnsVpnService : VpnService() {
             vpnInterface = builder.establish()
 
             if (vpnInterface != null) {
-                inStream = FileInputStream(vpnInterface!!.fileDescriptor)
-                outStream = FileOutputStream(vpnInterface!!.fileDescriptor)
-                isRunning = true
+                synchronized(streamLock) {
+                    inStream = FileInputStream(vpnInterface!!.fileDescriptor)
+                    outStream = FileOutputStream(vpnInterface!!.fileDescriptor)
+                    isRunning = true
+                }
 
                 startDnsRelay()
-                updateNotificationAndState(displayIp, dnsName, hostnameToDisplay)
+                updateNotificationAndState(displayIp, dnsName, hostnameToDisplay, isUsingFallback)
                 Log.i(TAG, "QuickDNS VpnService успешно запущен и готов к работе!")
             } else {
                 Log.e(TAG, "Не удалось создать VPN интерфейс: establish() вернул null")
@@ -234,10 +257,25 @@ class DnsVpnService : VpnService() {
     private fun resolveUpstream(target: String): List<InetAddress> {
         return try {
             val list = InetAddress.getAllByName(target).toList()
-            if (list.isNotEmpty()) list else listOf(InetAddress.getByName(fallbackIpForHost(target)))
+            if (list.isNotEmpty()) {
+                isUsingFallback = false
+                list
+            } else {
+                useFallbackAddress(target)
+            }
         } catch (e: Exception) {
             Log.w(TAG, "Ошибка резолва $target: ${e.message}, используем резервный IP")
-            listOf(InetAddress.getByName(fallbackIpForHost(target)))
+            useFallbackAddress(target)
+        }
+    }
+
+    private fun useFallbackAddress(target: String): List<InetAddress> {
+        isUsingFallback = true
+        val fb = fallbackIpForHost(target)
+        return try {
+            listOf(InetAddress.getByName(fb))
+        } catch (e: Exception) {
+            listOf(InetAddress.getByName("1.1.1.1"))
         }
     }
 
@@ -257,8 +295,10 @@ class DnsVpnService : VpnService() {
      */
     private fun startDnsRelay() {
         relayThread = Thread({
-            val inS = inStream ?: return@Thread
-            val outS = outStream ?: return@Thread
+            val inS: FileInputStream
+            synchronized(streamLock) {
+                inS = inStream ?: return@Thread
+            }
             val packetBuffer = ByteArray(32767)
 
             Log.i(TAG, "Поток перехвата DNS пакетов запущен")
@@ -304,14 +344,13 @@ class DnsVpnService : VpnService() {
                         val queriedServerIp = ByteArray(4)
                         System.arraycopy(packetBuffer, 16, queriedServerIp, 0, 4)
 
-                        // Пересылаем запрос в пуле рабочих потоков
+                        // Пересылаем запрос в эластичном пуле потоков
                         dnsThreadPool.execute {
                             resolveAndReply(
                                 dnsQuery = dnsQuery,
                                 clientIp = clientIp,
                                 clientPort = srcPort,
-                                queriedServerIp = queriedServerIp,
-                                outStream = outS
+                                queriedServerIp = queriedServerIp
                             )
                         }
                     }
@@ -335,8 +374,7 @@ class DnsVpnService : VpnService() {
         dnsQuery: ByteArray,
         clientIp: ByteArray,
         clientPort: Int,
-        queriedServerIp: ByteArray,
-        outStream: FileOutputStream
+        queriedServerIp: ByteArray
     ) {
         val response = queryUpstreamWithFallback(dnsQuery) ?: return
 
@@ -349,10 +387,11 @@ class DnsVpnService : VpnService() {
                 payload = response
             )
 
-            synchronized(outStream) {
-                if (isRunning && vpnInterface != null) {
-                    outStream.write(replyPacket)
-                    outStream.flush()
+            synchronized(streamLock) {
+                val outS = outStream
+                if (isRunning && vpnInterface != null && outS != null) {
+                    outS.write(replyPacket)
+                    outS.flush()
                 }
             }
         } catch (e: Exception) {
@@ -361,7 +400,7 @@ class DnsVpnService : VpnService() {
     }
 
     /**
-     * Многоуровневый резолвер: UDP -> DoT -> Fallback DNS
+     * Многоуровневый резолвер: DoT (если указан) -> UDP -> DoT -> Fallback DNS (если сервер не отвечает)
      */
     private fun queryUpstreamWithFallback(query: ByteArray): ByteArray? {
         val targets = upstreamResolvedAddresses
@@ -384,11 +423,15 @@ class DnsVpnService : VpnService() {
         val dotResp = queryDnsOverTls(query, targetHost, targets.firstOrNull())
         if (dotResp != null) return dotResp
 
-        // 4. Защита от потери интернета: безопасный fallback на резервный Cloudflare 1.1.1.1
+        // 4. Защита от полной потери интернета: fallback на резервный 1.1.1.1 с обновлением статуса
         try {
             val fallbackAddr = InetAddress.getByName("1.1.1.1")
             val fallbackResp = queryUdp(query, fallbackAddr, 53, timeoutMs = 2500)
             if (fallbackResp != null) {
+                if (!isUsingFallback) {
+                    isUsingFallback = true
+                    _vpnState.value = _vpnState.value.copy(isUsingFallback = true)
+                }
                 Log.d(TAG, "Использован fallback DNS 1.1.1.1 для сохранения доступа в сеть")
                 return fallbackResp
             }
@@ -439,8 +482,6 @@ class DnsVpnService : VpnService() {
         return try {
             val targetAddr = address ?: InetAddress.getByName(hostName)
             val socketFactory = SSLSocketFactory.getDefault() as SSLSocketFactory
-            val rawSocket = DatagramSocket()
-            rawSocket.close()
 
             // Создаем TCP сокет и защищаем его
             val plainSocket = java.net.Socket()
@@ -577,15 +618,16 @@ class DnsVpnService : VpnService() {
         return packet
     }
 
-    private fun updateNotificationAndState(resolvedIp: String, dnsName: String, hostname: String?) {
-        val notification = createNotification(resolvedIp, dnsName, hostname)
+    private fun updateNotificationAndState(resolvedIp: String, dnsName: String, hostname: String?, usingFallback: Boolean) {
+        val notification = createNotification(resolvedIp, dnsName, hostname, usingFallback)
         startForeground(NOTIFICATION_ID, notification)
 
         _vpnState.value = VpnStatus(
             isActive = true,
             currentDnsIp = resolvedIp,
             currentDnsName = dnsName,
-            currentHostname = hostname
+            currentHostname = hostname,
+            isUsingFallback = usingFallback
         )
     }
 
@@ -596,22 +638,24 @@ class DnsVpnService : VpnService() {
         } catch (ignored: Exception) {}
         relayThread = null
 
-        try {
-            inStream?.close()
-        } catch (ignored: Exception) {}
-        inStream = null
+        synchronized(streamLock) {
+            try {
+                inStream?.close()
+            } catch (ignored: Exception) {}
+            inStream = null
 
-        try {
-            outStream?.close()
-        } catch (ignored: Exception) {}
-        outStream = null
+            try {
+                outStream?.close()
+            } catch (ignored: Exception) {}
+            outStream = null
 
-        try {
-            vpnInterface?.close()
-        } catch (e: Exception) {
-            Log.e(TAG, "Ошибка закрытия vpnInterface", e)
-        } finally {
-            vpnInterface = null
+            try {
+                vpnInterface?.close()
+            } catch (e: Exception) {
+                Log.e(TAG, "Ошибка закрытия vpnInterface", e)
+            } finally {
+                vpnInterface = null
+            }
         }
     }
 
@@ -622,7 +666,8 @@ class DnsVpnService : VpnService() {
             isActive = false,
             currentDnsIp = null,
             currentDnsName = null,
-            currentHostname = null
+            currentHostname = null,
+            isUsingFallback = false
         )
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -657,7 +702,7 @@ class DnsVpnService : VpnService() {
         }
     }
 
-    private fun createNotification(dnsIp: String, dnsName: String, hostname: String?): Notification {
+    private fun createNotification(dnsIp: String, dnsName: String, hostname: String?, usingFallback: Boolean): Notification {
         val openAppIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -678,10 +723,11 @@ class DnsVpnService : VpnService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        val desc = if (hostname != null) "DNS: $dnsName ($hostname → $dnsIp)" else "DNS: $dnsName ($dnsIp)"
+        val baseDesc = if (hostname != null) "DNS: $dnsName ($hostname → $dnsIp)" else "DNS: $dnsName ($dnsIp)"
+        val desc = if (usingFallback) "$baseDesc (Резерв: 1.1.1.1)" else baseDesc
 
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("QuickDNS Switcher Активен")
+            .setContentTitle(if (usingFallback) "QuickDNS: Резервный DNS активен" else "QuickDNS Switcher Активен")
             .setContentText(desc)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pendingOpenApp)
@@ -696,5 +742,6 @@ data class VpnStatus(
     val isActive: Boolean,
     val currentDnsIp: String?,
     val currentDnsName: String?,
-    val currentHostname: String? = null
+    val currentHostname: String? = null,
+    val isUsingFallback: Boolean = false
 )

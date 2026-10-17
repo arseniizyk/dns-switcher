@@ -125,8 +125,15 @@ fun QuickDnsScreen() {
         )
     }
 
-    var customDnsList by remember { mutableStateOf(listOf<DnsItem>()) }
-    var selectedDns by remember { mutableStateOf(defaultPresets[0]) }
+    var customDnsList by remember {
+        mutableStateOf(DnsPreferences.getCustomDnsList(context))
+    }
+
+    var selectedDns by remember {
+        val savedId = DnsPreferences.getSelectedDnsId(context)
+        val initial = (defaultPresets + customDnsList).firstOrNull { it.id == savedId } ?: defaultPresets[0]
+        mutableStateOf(initial)
+    }
 
     var customTargetInput by remember { mutableStateOf("") }
     var customNameInput by remember { mutableStateOf("") }
@@ -141,6 +148,7 @@ fun QuickDnsScreen() {
             pendingDnsToStart?.let { dns ->
                 DnsVpnService.start(context, dns.target, dns.name, dns.hostname)
                 selectedDns = dns
+                DnsPreferences.saveSelectedDnsId(context, dns.id)
             }
         } else {
             Toast.makeText(context, "Разрешение на VPN отклонено", Toast.LENGTH_SHORT).show()
@@ -149,13 +157,14 @@ fun QuickDnsScreen() {
     }
 
     fun switchOrStartVpn(dns: DnsItem) {
+        selectedDns = dns
+        DnsPreferences.saveSelectedDnsId(context, dns.id)
         val prepareIntent = VpnService.prepare(context)
         if (prepareIntent != null) {
             pendingDnsToStart = dns
             vpnPermissionLauncher.launch(prepareIntent)
         } else {
             DnsVpnService.start(context, dns.target, dns.name, dns.hostname)
-            selectedDns = dns
         }
     }
 
@@ -196,6 +205,7 @@ fun QuickDnsScreen() {
                     currentDnsName = vpnStatus.currentDnsName ?: selectedDns.name,
                     currentDnsTarget = vpnStatus.currentHostname ?: vpnStatus.currentDnsIp ?: selectedDns.target,
                     resolvedIp = vpnStatus.currentDnsIp,
+                    isUsingFallback = vpnStatus.isUsingFallback,
                     onToggle = {
                         if (vpnStatus.isActive) {
                             DnsVpnService.stop(context)
@@ -279,7 +289,9 @@ fun QuickDnsScreen() {
                             if (vpnStatus.isActive && vpnStatus.currentDnsIp == dns.target) {
                                 DnsVpnService.stop(context)
                             }
-                            customDnsList = customDnsList.filter { it.id != dns.id }
+                            val updated = customDnsList.filter { it.id != dns.id }
+                            customDnsList = updated
+                            DnsPreferences.saveCustomDnsList(context, updated)
                         }
                     )
                 }
@@ -377,7 +389,9 @@ fun QuickDnsScreen() {
                                         isCustom = true,
                                         isDoT = isDomain
                                     )
-                                    customDnsList = customDnsList + newDns
+                                    val updated = customDnsList + newDns
+                                    customDnsList = updated
+                                    DnsPreferences.saveCustomDnsList(context, updated)
                                     customTargetInput = ""
                                     customNameInput = ""
                                     isInputError = false
@@ -409,10 +423,13 @@ fun BigStatusButton(
     currentDnsName: String,
     currentDnsTarget: String,
     resolvedIp: String?,
+    isUsingFallback: Boolean = false,
     onToggle: () -> Unit
 ) {
     val buttonColor by animateColorAsState(
-        targetValue = if (isActive) Color(0xFF10B981) else MaterialTheme.colorScheme.primary,
+        targetValue = if (isActive) {
+            if (isUsingFallback) Color(0xFFF59E0B) else Color(0xFF10B981)
+        } else MaterialTheme.colorScheme.primary,
         animationSpec = tween(durationMillis = 400),
         label = "ButtonColor"
     )
@@ -432,8 +449,10 @@ fun BigStatusButton(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(24.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (isActive) Color(0xFF064E3B).copy(alpha = 0.25f)
-            else MaterialTheme.colorScheme.surfaceVariant
+            containerColor = if (isActive) {
+                if (isUsingFallback) Color(0xFF78350F).copy(alpha = 0.25f)
+                else Color(0xFF064E3B).copy(alpha = 0.25f)
+            } else MaterialTheme.colorScheme.surfaceVariant
         )
     ) {
         Column(
@@ -484,19 +503,28 @@ fun BigStatusButton(
             Spacer(modifier = Modifier.height(16.dp))
 
             Text(
-                text = if (isActive) "ЗАЩИТА ВКЛЮЧЕНА" else "DNS ОТКЛЮЧЕН",
+                text = if (isActive) {
+                    if (isUsingFallback) "РЕЗЕРВНЫЙ DNS (1.1.1.1)" else "ЗАЩИТА ВКЛЮЧЕНА"
+                } else "DNS ОТКЛЮЧЕН",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.ExtraBold,
-                color = if (isActive) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant
+                color = if (isActive) {
+                    if (isUsingFallback) Color(0xFFF59E0B) else Color(0xFF10B981)
+                } else MaterialTheme.colorScheme.onSurfaceVariant
             )
 
             Spacer(modifier = Modifier.height(4.dp))
 
             val subtitle = if (isActive) {
-                if (resolvedIp != null && resolvedIp != currentDnsTarget) {
+                val base = if (resolvedIp != null && resolvedIp != currentDnsTarget) {
                     "Активен: $currentDnsName ($currentDnsTarget → $resolvedIp)"
                 } else {
                     "Активен: $currentDnsName ($currentDnsTarget)"
+                }
+                if (isUsingFallback) {
+                    "$base\n(Сервер не ответил, используется резерв 1.1.1.1)"
+                } else {
+                    base
                 }
             } else {
                 "Нажмите для подключения через $currentDnsName"
