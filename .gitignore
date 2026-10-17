@@ -17,6 +17,7 @@ captures/
 # Keystore and signing credentials
 *.jks
 *.keystore
+keystore.properties
 
 # Build artifacts
 *.apk

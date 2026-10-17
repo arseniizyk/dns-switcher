@@ -1,3 +1,6 @@
+import java.util.Properties
+import java.io.FileInputStream
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -20,12 +23,29 @@ android {
 
     signingConfigs {
         create("release") {
-            val keyStoreFile = file("quickdns-release.jks")
-            if (keyStoreFile.exists()) {
+            val keystorePropsFile = rootProject.file("keystore.properties")
+            val keystoreProps = Properties()
+            if (keystorePropsFile.exists()) {
+                keystoreProps.load(FileInputStream(keystorePropsFile))
+            }
+
+            val storeFilePath = keystoreProps.getProperty("storeFile")
+                ?: System.getenv("KEYSTORE_PATH")
+                ?: "quickdns-release.jks"
+            val keyStoreFile = file(storeFilePath)
+
+            val sPassword = keystoreProps.getProperty("storePassword")
+                ?: System.getenv("KEYSTORE_PASSWORD")
+            val kAlias = keystoreProps.getProperty("keyAlias")
+                ?: System.getenv("KEY_ALIAS")
+            val kPassword = keystoreProps.getProperty("keyPassword")
+                ?: System.getenv("KEY_PASSWORD")
+
+            if (keyStoreFile.exists() && !sPassword.isNullOrEmpty() && !kAlias.isNullOrEmpty() && !kPassword.isNullOrEmpty()) {
                 storeFile = keyStoreFile
-                storePassword = System.getenv("KEYSTORE_PASSWORD") ?: "quickdns123"
-                keyAlias = System.getenv("KEY_ALIAS") ?: "quickdns"
-                keyPassword = System.getenv("KEY_PASSWORD") ?: "quickdns123"
+                storePassword = sPassword
+                keyAlias = kAlias
+                keyPassword = kPassword
                 enableV1Signing = true
                 enableV2Signing = true
                 enableV3Signing = true
